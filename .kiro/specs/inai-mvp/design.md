@@ -52,7 +52,7 @@ Native engine is authoritative for capture and stream state. The JS RecordingCon
 
 Capture states: `idle`, `ready`, `recording_specific`, `recording_day`, `paused`, `stopping`, `stopped`, `interrupted`, `error`. UI-only states: `requesting_permission`, `saved`.
 
-Stream status is orthogonal: `connecting`, `authenticated`, `streaming`, `reconnecting`, `offline`, `closed`.
+Stream status is orthogonal: `connecting`, `authenticated`, `streaming`, `reconnecting`, `offline`, `expired`, `closed`.
 
 Rules:
 - `paused` is user-initiated only. An OS interruption must never be represented as a user pause; it yields `interrupted` and opens a capture gap.
@@ -155,8 +155,40 @@ Provider sessions are owned by the server and decoupled from the device socket.
 - Each rotation is logged as a `session_events` row with safe metadata.
 - Throttling and provider errors trigger backoff with degraded-state warnings.
 
-### Reconnect
-Reconnect uses the same `client_stream_id`. A transport reconnect may start a new provider session; text spanning that boundary can be split across two messages. This is expected and documented.
+### Resume, pause and expiry **[Approved A11 clarification]**
+Checkpoint statuses: `active`, `paused`, `reconnect_pending`, `expired`, `ended`. The first three hold the user's active-stream slot; `expired` and `ended` release it.
+
+**Resume and ownership**
+- Every reconnect opens a new socket and must send `stream.auth` first (Firebase ID token). `stream.start` with `resume = true` and the existing `client_stream_id` is accepted only if the checkpoint belongs to the authenticated user. Lookups are always by `(authenticated user_id, client_stream_id)`.
+- A resume for an unknown or not-owned `client_stream_id` is rejected with `stream_not_found`. The response is identical in both cases so existence is not disclosed. The failed attempt is logged as a safe metadata counter only.
+- `client_stream_id` is an identifier, never a credential. Knowing it grants nothing without a valid token for the owning user.
+- A valid resume continues the checkpoint: the server returns `last_accepted_sequence`, ignores chunks at or below it (idempotent duplicate handling) and continues numbering above it. Duplicate or non-contiguous sequence numbers are rejected and never renumbered.
+- If the old socket is still half-open, the server closes it with `transport_replaced`. This is a transport change for the same stream, not a second stream.
+- The existing provider session is reused if it is still alive. A new provider session is created only if the previous one has already ended (idle close, rotation or provider failure), and never two concurrent sessions for one stream. Text spanning a provider session boundary can be split across two messages. This is expected and documented.
+- Duplicate transcript messages are prevented by the user-scoped unique key `(user_id, source_stream_id, source_event_key)` (§10). Audio older than the replay window (A8) stays a capture gap even when the resume succeeds.
+
+**Intentional pause**
+- An explicit user pause (`stream.pause`, or a day-session pause) sets the checkpoint to `paused`. No unexpected-disconnection timer runs for a `paused` stream, whether or not its socket stays open.
+- A paused stream remains resumable: a reconnect with `resume = true` and `stream.resume`, authenticated as above, continues it.
+- The user can explicitly stop a paused stream: after an authenticated resume connection the client sends `stream.end`, or the day-session `end` endpoint ends the day and its stream. The checkpoint becomes `ended` and the slot is released.
+
+**Unexpected disconnection and grace window**
+- If a socket drops, or heartbeats are missed (interval config), while the checkpoint is `active`, the server sets `reconnect_pending` and `grace_expires_at = now + reconnect_grace` (config).
+- `reconnect_grace` is finite and configurable. Its **initial value is an implementation/configuration decision that requires reconnect testing** (mobile network switches, Wi-Fi to cellular, tunnels, Doze). No numeric default is fixed here.
+- The grace window and the replay window (A8) are independent. Resuming inside the grace window with audio beyond the replay window succeeds, and the unreplayed span stays a capture gap.
+- A resume inside the window restores `active`, clears `grace_expires_at` and continues the stream.
+- A paused stream is never moved to `reconnect_pending`. If the socket drops while the checkpoint is `paused` it stays `paused`.
+
+**Expiry**
+- When `grace_expires_at` passes, the server (a background expiry task plus a lazy check whenever a user starts or resumes a stream) atomically:
+  1. sets the checkpoint to `expired`, releasing the active-stream slot;
+  2. closes and cleans up the stream's provider session;
+  3. marks the associated conversation and day session `interrupted`;
+  4. ensures a server-detected capture gap (`reported_by = server`, reason `network_loss`, `end_estimated = true`) covers the span after the last accepted audio, and writes a `session_events` row `stream_expired` with safe metadata only.
+- All previously persisted transcript messages, bookmarks and edits are untouched.
+- The user is told. The native engine shows `interrupted` with cause `stream_expired`, with a visual banner, haptics, and a local notification where the OS permits (see FR-11). The interrupted status and gap reach other screens through sync.
+- A late `stream.start` with `resume = true` for an expired stream is rejected with `stream_expired` and a user-readable message (English default, localised by code), for example "This recording was interrupted and has ended." It is never resumed.
+- After `stream_expired` the engine starts a **new** stream with a **new** `client_stream_id` attached to the same day session or conversation. Audio buffered for the expired stream is discarded, not replayed. If native capture is no longer running, a new stream starts only on explicit user action (product principle 1).
 
 ## 9. Timestamp mapping **[Approved A13]**
 1. **Anchor:** `stream.start` carries `anchor_utc_ms` (device wall clock) and a monotonic reading. Every `audio.chunk` has `capture_offset_ms` (monotonic since anchor, including paused periods) and `duration_ms`.
@@ -245,7 +277,7 @@ Endpoint example: `/v1/stream`. Every message carries `schema_version`, `event_i
 - The server verifies the token, derives the user, and replies `stream.auth.ok` with the token expiry.
 - Before expiry the client sends `stream.reauth` with a fresh token. If none arrives, the server closes with `auth_expired`.
 - Tokens never appear in URLs, query strings or logs.
-- Application close codes include `auth_failed`, `auth_expired`, `stream_already_active`, `schema_unsupported` and `rate_limited`.
+- Application close codes include `auth_failed`, `auth_expired`, `stream_already_active`, `stream_expired`, `stream_not_found`, `transport_replaced`, `schema_unsupported` and `rate_limited`.
 - Replaced the earlier ticket-based proposal. Reason: a first-message token avoids URL leakage without adding a ticket service.
 
 ### Behaviour
@@ -254,13 +286,13 @@ Endpoint example: `/v1/stream`. Every message carries `schema_version`, `event_i
 - `transcript.partial` is never persisted and is held in memory only by the UI.
 - Persistence of finals is by the server; JS does not need to be alive. JS catches up on foreground using sync pull.
 - One active stream per user **[Approved A11]**:
-  - After authentication, `stream.start` with a new `client_stream_id` is checked against the user's active stream (a stream whose checkpoint status is active or paused, or whose connection dropped inside the reconnect grace window, config).
+  - After authentication, `stream.start` with a new `client_stream_id` is checked against the user's active stream: a checkpoint whose status is `active`, `paused` or `reconnect_pending` (unexpired grace window, config). `expired` and `ended` checkpoints do not hold the slot.
   - If another stream is active, the server rejects the new stream: it closes that connection with `stream_already_active` and a problem-details style payload containing a stable error code and a user-readable message (English default; the client localises by code), for example "Another recording is already active on your account."
   - The existing stream is never closed, superseded or modified. It keeps its provider session, checkpoint, sequence numbers and conversation routing, and no gap or session event is written for it.
   - A rejected stream creates no checkpoint, no provider session and no transcript data, and receives no audio processing.
-  - `stream.start` with the existing `client_stream_id` is a resume (see Reconnect), not a second stream.
+  - `stream.start` with `resume = true` and the user's existing `client_stream_id` is a resume (see Resume, pause and expiry), not a second stream.
   - The native engine surfaces the rejection as an `error` state with cause `stream_already_active`, discards any buffered audio from the rejected attempt, and the UI shows the message and points the user to the active recording. It does not retry automatically.
-  - The check and the checkpoint creation happen atomically so two simultaneous starts cannot both succeed.
+  - The check and the checkpoint creation happen atomically, enforced by a partial unique index on `stream_checkpoints(user_id)` for the slot-holding statuses, so two simultaneous starts cannot both succeed.
 
 ## 13. Database entities and rules
 Entities: `users`, `user_settings`, `day_sessions`, `conversations`, `transcript_messages`, `transcript_bookmarks`, `capture_gaps`, `session_events`, `stream_checkpoints`, `sync_tombstones`, `processed_operations`, `consent_records`.
@@ -442,11 +474,16 @@ CREATE TABLE stream_checkpoints (
  provider_id TEXT,
  provider_locale TEXT,
  provider_session_count INTEGER NOT NULL DEFAULT 0,
- status TEXT NOT NULL,
+ status TEXT NOT NULL CHECK (status IN ('active','paused','reconnect_pending','expired','ended')),
+ grace_expires_at TIMESTAMPTZ,                 -- set only while status = 'reconnect_pending'
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  UNIQUE (user_id, client_stream_id),
  FOREIGN KEY (conversation_id, user_id) REFERENCES conversations(id, user_id) ON DELETE SET NULL (conversation_id)
 );
+
+-- Enforces one active stream per user (A11): only one slot-holding checkpoint per user.
+CREATE UNIQUE INDEX one_active_stream_per_user ON stream_checkpoints (user_id)
+ WHERE status IN ('active','paused','reconnect_pending');
 
 CREATE TABLE sync_tombstones (
  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

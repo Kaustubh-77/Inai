@@ -79,7 +79,7 @@ Implement anchor, clock-skew handling, provider-to-capture offset mapping and `t
 **Done when:** tests cover pauses, VAD gating, reconnects, clock skew and providers with and without offsets.
 
 ### T2.4 Gaps and replay semantics (server side)
-Implement `audio.ack`, resume by `client_stream_id`, `capture_gaps` creation (client-reported and server-detected) and idempotent gap reporting.
+Implement `audio.ack`, resume by `client_stream_id` (ownership and expiry rules are specified in T2.6), `capture_gaps` creation (client-reported and server-detected) and idempotent gap reporting.
 **Done when:** gap and resume tests pass; no text is invented for gaps. **[Approved A8]**
 
 ### T2.5 Provider session rotation
@@ -87,8 +87,21 @@ Implement session lifecycle, idle close, planned rotation at silence, forced rot
 **Done when:** simulated long sessions produce no lost or duplicated speech beyond documented limits.
 
 ### T2.6 One-active-stream policy
-Implement rejection of a second stream with the `stream_already_active` close code and a user-readable error message, with an atomic check against the user's active stream. The existing stream must continue unaffected, and a resume with the existing `client_stream_id` must still work. **[Approved A11]**
-**Done when:** tests show a second stream is rejected with the clear message, the existing stream's provider session, sequence numbers, checkpoint and transcript persistence are unaffected, simultaneous starts cannot both succeed, resume works, and a rejected stream persists no data.
+Implement rejection of a second stream with the `stream_already_active` close code and a user-readable error message, with an atomic check against the user's active stream. The existing stream must continue unaffected. Implement resume with the safeguards below, using a configurable reconnect grace window whose initial value is **not fixed** (set after reconnect testing). **[Approved A11 and clarification]**
+- Resume: Firebase authentication on every reconnect, ownership verification of the checkpoint, `client_stream_id` treated as an identifier and not a credential, reuse of the existing checkpoint, sequence numbering and live provider session.
+- Intentional pause stays resumable and is exempt from the grace timer; the user can resume or stop it.
+- Unexpected disconnection holds the slot for the grace window; expiry marks the stream expired/interrupted, releases the slot, cleans up the provider session, preserves persisted transcripts and surfaces the interruption; a late reconnect receives `stream_expired` and a new stream is required.
+
+**Done when** automated tests (using the fake provider and a controllable clock, with no hard-coded grace duration) show:
+1. A second stream is rejected with the clear message; the existing stream's provider session, sequence numbers, checkpoint and transcript persistence are unaffected; simultaneous starts cannot both succeed; a rejected stream persists no data.
+2. A valid reconnect within the grace period resumes the existing stream.
+3. A reconnect after expiry is rejected with `stream_expired`.
+4. An intentionally paused stream remains resumable and is not expired by the grace timer.
+5. A wrong-user checkpoint access (resume of another user's `client_stream_id`) is rejected with `stream_not_found` and discloses nothing; an unauthenticated or expired-token reconnect is rejected.
+6. An expired stream releases the active-stream slot, so a new stream can start.
+7. Existing persisted transcripts remain intact after expiry.
+8. No duplicate transcript messages and no sequence-number corruption after resume, replay overlap, duplicate chunks or a half-open socket being replaced.
+9. A resume reuses the live provider session and never creates two concurrent provider sessions for one stream.
 
 ## Milestone 3 — Mobile shell, domain and local store
 ### T3.1 Cross-platform scaffold

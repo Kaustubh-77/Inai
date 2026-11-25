@@ -51,7 +51,13 @@ Do not assume a sample rate, encoding, channel count, chunk size or ASR locale u
 ## Streaming lifecycle
 - **Auth:** first message on the socket is `stream.auth` carrying a Firebase ID token. Connections that do not authenticate within a short timeout are closed. Tokens are never placed in URLs or logs. Re-auth happens in-band (`stream.reauth`) before expiry **[Approved A1]**.
 - **Reconnect:** the client resumes by `client_stream_id`; the server returns the last accepted sequence. Native replays only unacknowledged chunks that are still inside a bounded **in-memory** replay window. Audio older than the window is lost and recorded as a capture gap. Window size is set by measurement **[Approved A8]**.
-- **One active stream per user [Approved A11].** If a second stream is requested while one is active, the server rejects the new stream with the close code `stream_already_active` and a clear, user-readable message that another recording is already active. The existing stream is never terminated, superseded or otherwise affected. A reconnect that reuses the existing `client_stream_id` is a resume of that stream, not a second stream.
+- **One active stream per user [Approved A11].** If a second stream is requested while one is active, the server rejects the new stream with the close code `stream_already_active` and a clear, user-readable message that another recording is already active. The existing stream is never terminated, superseded or otherwise affected. A reconnect that reuses the existing `client_stream_id` is a resume of that stream, not a second stream (see Resume, pause and expiry).
+- **Resume, pause and expiry [Approved A11 clarification]:**
+  - Every reconnect authenticates again with a Firebase ID token in the first message. The server resolves `client_stream_id` only within the authenticated user's own checkpoints and rejects a resume for a checkpoint the user does not own without revealing whether it exists. `client_stream_id` is an identifier, never a credential.
+  - A valid resume continues the existing checkpoint and sequence numbering. It does not create a second provider session (a new one is created only if the previous one has already ended) and does not duplicate transcript messages.
+  - An explicit user pause stays resumable and is not subject to the unexpected-disconnection timer. The user can explicitly resume or stop it.
+  - An unexpected disconnection keeps the stream's active-stream slot for a finite, configurable reconnect grace window. Its initial value is an implementation/configuration decision that requires reconnect testing; no number is fixed here.
+  - If the window expires, the stream is marked expired and interrupted, its slot is released, its provider session is cleaned up and the user is told. Previously persisted transcript data is kept. A late reconnect receives `stream_expired` and must start a new stream; an expired stream is never silently resumed.
 - **Provider session rotation:** the server owns provider sessions, separate from the device socket. Provider stream duration limits and idle timeouts are unverified; the adapter exposes them as capabilities. See design.md §8.
 
 ## Session model
@@ -109,6 +115,7 @@ All routes require a verified Firebase ID token. Mutating routes accept an `Idem
 ## WebSocket events
 Client to server: `stream.auth`, `stream.reauth`, `stream.start`, `audio.chunk`, `segment.suggested`, `segment.new`, `stream.pause`, `stream.resume`, `capture.gap`, `stream.end`.
 Server to client: `stream.auth.ok`, `audio.ack`, `transcript.partial`, `transcript.final`, `segment.opened`, `stream.warning`, `stream.closed`.
+Stream rejection and expiry are reported with close codes `stream_already_active`, `stream_expired` and `stream_not_found`.
 Include schema version, event IDs, sequence numbers and timestamps. Use acknowledgements, idempotency, bounded buffers, backpressure and reconnect.
 
 ## Persistence
