@@ -156,4 +156,6 @@ Cross-cutting findings:
 3. Keep the language catalog fully `unverified` until evidence exists; the app then cannot start recording, which is the intended safe default.
 4. Shortlist SQLite options for T3.4 as in D; run the search spike (T1.1) before choosing tokenizers.
 5. Decide sign-in methods early because phone sign-in implies Blaze billing and SMS cost.
-**Open questions:** cloud vendor, region, hosting; sign-in methods; UI locales; final ASR provider; iOS build and device ownership; macOS CI runner; SQLite library and encryption; PostgreSQL version and hosting; server-side transcript encryption and row-level security; backup retention; concurrent-stream policy.
+**Open questions:** cloud vendor, region, hosting; sign-in methods; UI locales; final ASR provider; iOS build and device ownership; macOS CI runner; SQLite library and encryption; PostgreSQL version and hosting; server-side transcript encryption and row-level security; backup retention.
+
+**Note on concurrency:** the one-active-stream policy is no longer an open question. It is defined by approved decision A11 (rejection of a second stream, resume, pause, expiry and recovery). Implementation must validate the approved A11 concurrency and lifecycle rules through the T2.6 tests.
