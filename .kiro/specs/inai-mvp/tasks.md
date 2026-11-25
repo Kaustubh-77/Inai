@@ -90,6 +90,9 @@ Implement session lifecycle, idle close, planned rotation at silence, forced rot
 Implement rejection of a second stream with the `stream_already_active` close code and a user-readable error message, with an atomic check against the user's active stream. The existing stream must continue unaffected. Implement resume with the safeguards below, using a configurable reconnect grace window whose initial value is **not fixed** (set after reconnect testing). **[Approved A11 and clarification]**
 - Resume: Firebase authentication on every reconnect, ownership verification of the checkpoint, `client_stream_id` treated as an identifier and not a credential, reuse of the existing checkpoint, sequence numbering and live provider session.
 - Intentional pause stays resumable and is exempt from the grace timer; the user can resume or stop it.
+- Paused streams hold the slot indefinitely (no pause timeout). Implement the owner-only `GET /v1/streams/active` and `POST /v1/streams/{client_stream_id}/end` operations: ownership verified server-side, only `paused` endable, atomic `ended` transition that releases the slot, closes any provider session, completes the associated sessions and preserves persisted transcripts, with the confirmation and outcome messages defined in the design.
+- All checkpoint transitions are database-level compare-and-set operations so resume and expiry can never both win.
+- After expiry a new stream has its own `client_stream_id`, checkpoint, provider session and sequence numbering; the expired checkpoint, interruption history and capture gap are preserved; interrupted conversation and day-session states return to active as specified; missing audio is never presented as recovered.
 - Unexpected disconnection holds the slot for the grace window; expiry marks the stream expired/interrupted, releases the slot, cleans up the provider session, preserves persisted transcripts and surfaces the interruption; a late reconnect receives `stream_expired` and a new stream is required.
 
 **Done when** automated tests (using the fake provider and a controllable clock, with no hard-coded grace duration) show:
@@ -102,6 +105,12 @@ Implement rejection of a second stream with the `stream_already_active` close co
 7. Existing persisted transcripts remain intact after expiry.
 8. No duplicate transcript messages and no sequence-number corruption after resume, replay overlap, duplicate chunks or a half-open socket being replaced.
 9. A resume reuses the live provider session and never creates two concurrent provider sessions for one stream.
+10. Remote end: the account owner ends a paused stream from a second authenticated session; the checkpoint becomes `ended`, the slot is released, a new stream can then start, and persisted transcripts, bookmarks and edits are unchanged.
+11. Remote end authorisation: another user's attempt returns an identical `404` and changes nothing; an unauthenticated or expired-token attempt is rejected; ending an `active` or `reconnect_pending` stream returns `409 stream_not_paused` and the stream continues unaffected; repeating the call is idempotent (`already_ended` / `already_expired`).
+12. A remotely ended stream's original device receives `stream_ended` (live socket close or next resume attempt) and is never resumed.
+13. Resume/expiry race with a controllable clock: with the clock before, exactly at (expiry wins) and after `grace_expires_at`, and with forced interleavings of the two transactions and of multiple backend instances, exactly one transition wins; if resume wins, a later or stale expiry changes nothing (no gap, no `stream_expired` event, provider session intact); if expiry wins, the late resume receives `stream_expired`, the slot is released, the provider session is cleaned up exactly once, and one gap and one event exist.
+14. Session state after expiry: a new stream after expiry has a new `client_stream_id`, sequence numbering starting fresh and a new provider session; the expired checkpoint stays `expired`; the capture gap and `stream_expired` event are preserved (a client-reported and server-detected gap for the same interval merge into one); day-session and conversation statuses follow the design table; no message is back-filled for the gap; message keys never collide across the two streams.
+15. Server-side restart rules: a resume of an expired stream is never accepted; a new stream is accepted only through a normal `stream.start`; a stream ended by the user or remotely cannot be resumed or auto-restarted by the server.
 
 ## Milestone 3 — Mobile shell, domain and local store
 ### T3.1 Cross-platform scaffold
@@ -142,7 +151,7 @@ Implement Swift capture, VAD, chunking, replay buffer and transport using AVAudi
 **Done when:** physical iPhone tests pass and interruptions are reported accurately; no raw audio is persisted.
 
 ### T4.4 Bridge and contract tests
-Test event ordering, bounded buffers, replay, gap events, token handling, JS-suspended behaviour, error propagation and stop semantics on both platforms.
+Test event ordering, bounded buffers, replay, gap events, token handling, JS-suspended behaviour, error propagation and stop semantics on both platforms. Also test the automatic-restart rules: a visible automatic new stream only while capture is still running under the original explicit action, and no restart after an explicit user stop, a remote `stream_ended`, a non-running capture or a rejected restart.
 **Done when:** shared contract works while exposing platform differences.
 
 ## Milestone 5 — Real ASR and Specific Conversation
@@ -173,7 +182,7 @@ New Conversation, rename, split and merge from the UI.
 
 ### T6.4 Recovery and gaps
 Handle OS interruption, process termination, network loss, auth expiry and provider failure with visible gaps, haptic/visual alerts and honest state.
-**Done when:** confirmed text survives and missing capture intervals are never fabricated.
+**Done when:** confirmed text survives and missing capture intervals are never fabricated; after stream expiry the visible automatic restart, the preserved gap and the separate stream identity behave as specified, and capture is never restarted after an explicit stop.
 
 ### T6.5 Rotation, cost and battery
 Validate rotation against the real provider limits and measure all-day cost and battery on devices.

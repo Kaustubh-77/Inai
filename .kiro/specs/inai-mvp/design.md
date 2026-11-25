@@ -170,7 +170,9 @@ Checkpoint statuses: `active`, `paused`, `reconnect_pending`, `expired`, `ended`
 **Intentional pause**
 - An explicit user pause (`stream.pause`, or a day-session pause) sets the checkpoint to `paused`. No unexpected-disconnection timer runs for a `paused` stream, whether or not its socket stays open.
 - A paused stream remains resumable: a reconnect with `resume = true` and `stream.resume`, authenticated as above, continues it.
-- The user can explicitly stop a paused stream: after an authenticated resume connection the client sends `stream.end`, or the day-session `end` endpoint ends the day and its stream. The checkpoint becomes `ended` and the slot is released.
+- A paused stream holds the active-stream slot **indefinitely** unless explicitly ended. No pause timeout is defined.
+- The user can explicitly stop a paused stream from the same device: after an authenticated resume connection the client sends `stream.end`, or the day-session `end` endpoint ends the day and its stream. The checkpoint becomes `ended` and the slot is released.
+- **Remote end from another session or device** (see Paused-stream recovery below).
 
 **Unexpected disconnection and grace window**
 - If a socket drops, or heartbeats are missed (interval config), while the checkpoint is `active`, the server sets `reconnect_pending` and `grace_expires_at = now + reconnect_grace` (config).
@@ -188,7 +190,47 @@ Checkpoint statuses: `active`, `paused`, `reconnect_pending`, `expired`, `ended`
 - All previously persisted transcript messages, bookmarks and edits are untouched.
 - The user is told. The native engine shows `interrupted` with cause `stream_expired`, with a visual banner, haptics, and a local notification where the OS permits (see FR-11). The interrupted status and gap reach other screens through sync.
 - A late `stream.start` with `resume = true` for an expired stream is rejected with `stream_expired` and a user-readable message (English default, localised by code), for example "This recording was interrupted and has ended." It is never resumed.
-- After `stream_expired` the engine starts a **new** stream with a **new** `client_stream_id` attached to the same day session or conversation. Audio buffered for the expired stream is discarded, not replayed. If native capture is no longer running, a new stream starts only on explicit user action (product principle 1).
+- After `stream_expired` a new stream is required. The rules for state, identity and restart are in "Session state after expiry" and "Automatic restart" below. Audio buffered for the expired stream is discarded, not replayed.
+
+**Paused-stream recovery (remote end)**
+- `GET /v1/streams/active` returns the authenticated user's slot-holding stream, if any: `client_stream_id`, `status`, the conversation/day-session it belongs to, and `paused_at`. A `stream_already_active` rejection returns the same fields to the owner (never to anyone else), so another device can offer the recovery.
+- `POST /v1/streams/{client_stream_id}/end` (authenticated, `Idempotency-Key` supported):
+  - The checkpoint is resolved only by `(authenticated user_id, client_stream_id)`. An unknown or not-owned id returns `404` with an identical body, so existence is not disclosed. Another user cannot end the stream.
+  - Only `paused` is endable. For `active` or `reconnect_pending` the response is `409 stream_not_paused` and nothing changes. A live stream is never terminated remotely and never superseded.
+  - Atomically: `paused` to `ended` (compare-and-set), `ended_reason = 'remote_user_end'`, the slot is released, any provider session is closed, the associated conversation and day session move to `completed` with `ended_at` set (the same outcome as the user stopping it), and a `session_events` row `stream_ended_remotely` is written with safe metadata. Persisted transcripts, bookmarks, edits and gaps are untouched.
+  - Repeating the call on an already ended stream returns `200` with outcome `already_ended`. An `expired` stream returns `200` with outcome `already_expired`.
+- If the original device is connected, it receives `stream.closed` with close code `stream_ended`; if it is offline, its next resume attempt receives `stream_ended`. In both cases the engine goes to `stopped`, discards any buffered audio, and shows that the recording was ended from another device. It never restarts capture.
+- **User-visible flow:** the other device shows a confirmation such as "A recording is paused on your account. Ending it keeps everything already transcribed, and it cannot be resumed. End recording?" with explicit End and Cancel actions. After success it shows "Recording ended. Your transcript has been kept." with a link to the conversation, and the user can start a new recording. If the stream is no longer paused it shows "That recording is no longer paused" with its current state. Errors are shown and no state changes.
+
+**Atomic transitions and the resume/expiry race**
+- All checkpoint status changes are compare-and-set operations executed by the database, not by in-process locks, so multiple backend instances cannot disagree. Each is a single transaction that takes a row lock on the checkpoint (or an equivalent `UPDATE ... WHERE status = expected RETURNING`) and evaluates its predicate against one time read from the injectable server clock.
+  | Transition | Predicate | Result |
+  |---|---|---|
+  | resume | `status = 'reconnect_pending' AND grace_expires_at > now` | `active`, `grace_expires_at` cleared |
+  | expiry | `status = 'reconnect_pending' AND grace_expires_at <= now` | `expired` |
+  | resume of a paused stream | `status = 'paused'` | `active` |
+  | remote or user end | `status = 'paused'` (or `active` for the owning connection's own `stream.end`) | `ended` |
+- Exactly one of resume and expiry can satisfy its predicate. At exactly `grace_expires_at` expiry wins. A transaction that waited on the lock re-evaluates its predicate after acquiring it, so the loser makes no change.
+- A resume that wins sets `active` and clears `grace_expires_at`; a later or stale expiry sees `status = 'active'` and does nothing. An expiry that wins sets `expired`; the late resume receives `stream_expired` and the existing "never silently resume" rule applies.
+- Side effects run only for the winner. Expiry's database effects (gap row, `stream_expired` event, interrupted statuses) are in the same transaction. Provider-session cleanup runs after commit and is idempotent, keyed on the committed `expired` status. A resume reuses the provider session only after its transaction has committed `active`. A background expiry task never acts on a stale read; it issues the conditional update itself.
+
+**Session state after expiry**
+- The expired checkpoint stays `expired` as history. It is never reopened. The interruption is preserved by the `stream_expired` session event, the capture-gap row and the conversation/day-session history.
+- When a new stream starts after expiry, the new stream has a new `client_stream_id`, a new checkpoint (`last_accepted_sequence = 0`), a new provider session, a new anchor and clock-skew estimate, and its own sequence numbering. Messages it creates use the new stream id in `source_stream_id`, so de-duplication keys never collide with the expired stream.
+- State transitions:
+  | Entity | At expiry | New stream starts under the original recording action (automatic restart) | New stream started by explicit user action |
+  |---|---|---|---|
+  | Day session | `interrupted` | `interrupted` to `active`; the new stream attaches to the same day session | `interrupted` to `active` through an explicit "Resume day" action. "End Day" is also allowed and sets `completed` |
+  | Conversation (routing target at expiry) | `interrupted` | `interrupted` to `active`; the new checkpoint routes to the same conversation, so the gap appears inline between the old and new messages | A specific conversation stays `interrupted` and a new explicit recording creates a new conversation. Inside a resumed day, routing follows the normal segmentation rules |
+- The capture gap and `stream_expired` event remain. The gap is closed when the new stream's first audio is accepted, with `end_estimated = true`. A gap reported by the client for the same interval and the server-detected gap are merged into one record (idempotent on `client_gap_id`).
+- Missing audio is never presented as recovered. The expired stream's buffered audio is discarded, no text is back-filled, and the UI keeps the gap marker. The new stream's timestamps derive from its own anchor.
+
+**Automatic restart**
+- A new stream may start automatically after `stream_expired` only while native capture is still running under the user's original explicit recording action (the microphone is still on and visibly indicated).
+- It must be visible: the interruption banner, haptics and a local notification where the OS permits (as for any interruption), and a visible "recording continued in a new stream" state, with the gap marker in the transcript. Silent restart is not permitted.
+- Never restart capture, and never open a new stream, after the user explicitly stopped it, after the recording was ended from another device, when capture is not running (for example an OS interruption of the microphone), or when the user has not started a recording. These cases need explicit user action.
+- The engine records the user's stop intent in memory; a stop or remote end cancels any pending restart.
+- A rejected restart (`stream_already_active`, authentication failure, offline) is not retried automatically beyond a bounded backoff (config); the user is then prompted.
 
 ## 9. Timestamp mapping **[Approved A13]**
 1. **Anchor:** `stream.start` carries `anchor_utc_ms` (device wall clock) and a monotonic reading. Every `audio.chunk` has `capture_offset_ms` (monotonic since anchor, including paused periods) and `duration_ms`.
@@ -263,6 +305,8 @@ Conventions: cursor pagination, a problem-details error model with stable error 
 | `DELETE /v1/conversations/{id}` | Delete conversation |
 | `DELETE /v1/day-sessions/{id}` | Delete day |
 | `GET /v1/sync/changes?cursor=` | Sync pull |
+| `GET /v1/streams/active` | The user's slot-holding stream, if any |
+| `POST /v1/streams/{client_stream_id}/end` | Owner ends a paused stream from any authenticated session |
 
 ## 12. WebSocket protocol
 Endpoint example: `/v1/stream`. Every message carries `schema_version`, `event_id`, `type`, `stream_id` and `sent_at`; audio chunks add `seq`, `capture_offset_ms`, `duration_ms` and VAD flags. Audio framing (binary frames with a JSON header versus encoded payloads) is decided in T2.1 from the evidence recorded in T0.2 and is not assumed here.
@@ -277,7 +321,7 @@ Endpoint example: `/v1/stream`. Every message carries `schema_version`, `event_i
 - The server verifies the token, derives the user, and replies `stream.auth.ok` with the token expiry.
 - Before expiry the client sends `stream.reauth` with a fresh token. If none arrives, the server closes with `auth_expired`.
 - Tokens never appear in URLs, query strings or logs.
-- Application close codes include `auth_failed`, `auth_expired`, `stream_already_active`, `stream_expired`, `stream_not_found`, `transport_replaced`, `schema_unsupported` and `rate_limited`.
+- Application close codes include `auth_failed`, `auth_expired`, `stream_already_active`, `stream_expired`, `stream_not_found`, `stream_ended`, `transport_replaced`, `schema_unsupported` and `rate_limited`.
 - Replaced the earlier ticket-based proposal. Reason: a first-message token avoids URL leakage without adding a ticket service.
 
 ### Behaviour
@@ -476,6 +520,8 @@ CREATE TABLE stream_checkpoints (
  provider_session_count INTEGER NOT NULL DEFAULT 0,
  status TEXT NOT NULL CHECK (status IN ('active','paused','reconnect_pending','expired','ended')),
  grace_expires_at TIMESTAMPTZ,                 -- set only while status = 'reconnect_pending'
+ paused_at TIMESTAMPTZ,                        -- set while status = 'paused'
+ ended_reason TEXT CHECK (ended_reason IN ('user_stop','remote_user_end','day_session_end')),
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  UNIQUE (user_id, client_stream_id),
  FOREIGN KEY (conversation_id, user_id) REFERENCES conversations(id, user_id) ON DELETE SET NULL (conversation_id)

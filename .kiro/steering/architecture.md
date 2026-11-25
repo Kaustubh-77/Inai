@@ -58,6 +58,11 @@ Do not assume a sample rate, encoding, channel count, chunk size or ASR locale u
   - An explicit user pause stays resumable and is not subject to the unexpected-disconnection timer. The user can explicitly resume or stop it.
   - An unexpected disconnection keeps the stream's active-stream slot for a finite, configurable reconnect grace window. Its initial value is an implementation/configuration decision that requires reconnect testing; no number is fixed here.
   - If the window expires, the stream is marked expired and interrupted, its slot is released, its provider session is cleaned up and the user is told. Previously persisted transcript data is kept. A late reconnect receives `stream_expired` and must start a new stream; an expired stream is never silently resumed.
+- **Paused-stream recovery, races and restart [Approved A11 final clarification]:**
+  - A paused stream holds the active-stream slot indefinitely unless explicitly ended; no pause timeout exists. The authenticated account owner can end it from another session or device through a server-side operation (`POST /v1/streams/{client_stream_id}/end`). Ownership is verified server-side, other users cannot end it, persisted transcripts are preserved, and the checkpoint becomes `ended`, releasing the slot. Only `paused` streams can be ended this way; a live stream is never terminated remotely.
+  - Every checkpoint status change is an atomic compare-and-set in the database, so a valid resume and an expiry that run concurrently resolve to exactly one winner. A resume that wins can never be expired afterwards; an expiry that wins makes the late resume receive `stream_expired`.
+  - A new stream after expiry has its own `client_stream_id`, checkpoint, provider session and sequence numbering. The expired checkpoint, the interruption history and the capture gap are preserved, and the missing audio is never presented as recovered.
+  - A new stream may start automatically after expiry only while native capture is still running under the user's original explicit recording action, and the interruption and the new stream are visible to the user. Capture is never restarted after the user explicitly stopped it, or after the stream was ended remotely.
 - **Provider session rotation:** the server owns provider sessions, separate from the device socket. Provider stream duration limits and idle timeouts are unverified; the adapter exposes them as capabilities. See design.md §8.
 
 ## Session model
@@ -109,13 +114,14 @@ Supported languages come from a server-side verified-language catalog that maps 
 - GET `/v1/search?q=&from=&to=`
 - GET `/v1/conversations/{id}/export`
 - GET `/v1/sync/changes?cursor=`
+- GET `/v1/streams/active`, POST `/v1/streams/{client_stream_id}/end` (owner-only; ends a paused stream)
 
 All routes require a verified Firebase ID token. Mutating routes accept an `Idempotency-Key`. Clients may supply UUIDs for creates.
 
 ## WebSocket events
 Client to server: `stream.auth`, `stream.reauth`, `stream.start`, `audio.chunk`, `segment.suggested`, `segment.new`, `stream.pause`, `stream.resume`, `capture.gap`, `stream.end`.
 Server to client: `stream.auth.ok`, `audio.ack`, `transcript.partial`, `transcript.final`, `segment.opened`, `stream.warning`, `stream.closed`.
-Stream rejection and expiry are reported with close codes `stream_already_active`, `stream_expired` and `stream_not_found`.
+Stream rejection, expiry and remote end are reported with close codes `stream_already_active`, `stream_expired`, `stream_not_found` and `stream_ended`.
 Include schema version, event IDs, sequence numbers and timestamps. Use acknowledgements, idempotency, bounded buffers, backpressure and reconnect.
 
 ## Persistence
