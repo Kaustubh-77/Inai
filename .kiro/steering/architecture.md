@@ -51,7 +51,7 @@ Do not assume a sample rate, encoding, channel count, chunk size or ASR locale u
 ## Streaming lifecycle
 - **Auth:** first message on the socket is `stream.auth` carrying a Firebase ID token. Connections that do not authenticate within a short timeout are closed. Tokens are never placed in URLs or logs. Re-auth happens in-band (`stream.reauth`) before expiry **[Approved A1]**.
 - **Reconnect:** the client resumes by `client_stream_id`; the server returns the last accepted sequence. Native replays only unacknowledged chunks that are still inside a bounded **in-memory** replay window. Audio older than the window is lost and recorded as a capture gap. Window size is set by measurement **[Approved A8]**.
-- **One active stream per user** by default; a newer stream supersedes or is rejected with an explicit close code **[Approved A11]**.
+- **One active stream per user [Approved A11].** If a second stream is requested while one is active, the server rejects the new stream with the close code `stream_already_active` and a clear, user-readable message that another recording is already active. The existing stream is never terminated, superseded or otherwise affected. A reconnect that reuses the existing `client_stream_id` is a resume of that stream, not a second stream.
 - **Provider session rotation:** the server owns provider sessions, separate from the device socket. Provider stream duration limits and idle timeouts are unverified; the adapter exposes them as capabilities. See design.md §8.
 
 ## Session model

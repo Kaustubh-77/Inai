@@ -245,7 +245,7 @@ Endpoint example: `/v1/stream`. Every message carries `schema_version`, `event_i
 - The server verifies the token, derives the user, and replies `stream.auth.ok` with the token expiry.
 - Before expiry the client sends `stream.reauth` with a fresh token. If none arrives, the server closes with `auth_expired`.
 - Tokens never appear in URLs, query strings or logs.
-- Application close codes include `auth_failed`, `auth_expired`, `superseded`, `schema_unsupported` and `rate_limited`.
+- Application close codes include `auth_failed`, `auth_expired`, `stream_already_active`, `schema_unsupported` and `rate_limited`.
 - Replaced the earlier ticket-based proposal. Reason: a first-message token avoids URL leakage without adding a ticket service.
 
 ### Behaviour
@@ -253,7 +253,14 @@ Endpoint example: `/v1/stream`. Every message carries `schema_version`, `event_i
 - `transcript.final` includes the persisted message ID; the client de-duplicates by ID.
 - `transcript.partial` is never persisted and is held in memory only by the UI.
 - Persistence of finals is by the server; JS does not need to be alive. JS catches up on foreground using sync pull.
-- One active stream per user **[Approved A11]**: a newer authenticated stream triggers `superseded` on the older one or is rejected (policy to be confirmed).
+- One active stream per user **[Approved A11]**:
+  - After authentication, `stream.start` with a new `client_stream_id` is checked against the user's active stream (a stream whose checkpoint status is active or paused, or whose connection dropped inside the reconnect grace window, config).
+  - If another stream is active, the server rejects the new stream: it closes that connection with `stream_already_active` and a problem-details style payload containing a stable error code and a user-readable message (English default; the client localises by code), for example "Another recording is already active on your account."
+  - The existing stream is never closed, superseded or modified. It keeps its provider session, checkpoint, sequence numbers and conversation routing, and no gap or session event is written for it.
+  - A rejected stream creates no checkpoint, no provider session and no transcript data, and receives no audio processing.
+  - `stream.start` with the existing `client_stream_id` is a resume (see Reconnect), not a second stream.
+  - The native engine surfaces the rejection as an `error` state with cause `stream_already_active`, discards any buffered audio from the rejected attempt, and the UI shows the message and points the user to the active recording. It does not retry automatically.
+  - The check and the checkpoint creation happen atomically so two simultaneous starts cannot both succeed.
 
 ## 13. Database entities and rules
 Entities: `users`, `user_settings`, `day_sessions`, `conversations`, `transcript_messages`, `transcript_bookmarks`, `capture_gaps`, `session_events`, `stream_checkpoints`, `sync_tombstones`, `processed_operations`, `consent_records`.

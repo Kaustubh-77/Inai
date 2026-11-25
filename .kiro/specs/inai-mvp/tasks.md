@@ -87,8 +87,8 @@ Implement session lifecycle, idle close, planned rotation at silence, forced rot
 **Done when:** simulated long sessions produce no lost or duplicated speech beyond documented limits.
 
 ### T2.6 One-active-stream policy
-Implement the chosen policy and close codes. **[Approved A11]**
-**Done when:** concurrent stream tests pass.
+Implement rejection of a second stream with the `stream_already_active` close code and a user-readable error message, with an atomic check against the user's active stream. The existing stream must continue unaffected, and a resume with the existing `client_stream_id` must still work. **[Approved A11]**
+**Done when:** tests show a second stream is rejected with the clear message, the existing stream's provider session, sequence numbers, checkpoint and transcript persistence are unaffected, simultaneous starts cannot both succeed, resume works, and a rejected stream persists no data.
 
 ## Milestone 3 — Mobile shell, domain and local store
 ### T3.1 Cross-platform scaffold

@@ -87,7 +87,8 @@ Approved decisions: (1) native Kotlin/Swift owns audio capture, VAD, chunking an
 - Persist confirmed transcript messages incrementally.
 - **Timestamps:** message times derive from native capture offsets mapped to UTC, with server correction for client clock skew. Each message records a `timestamp_source`; approximate timing is not presented as exact.
 - **Provider session rotation:** the server rotates provider sessions to respect provider duration and idle limits **[Unverified]** without losing or duplicating speech, preferring silence boundaries, and records rotations and any resulting gaps.
-- One active stream per user; a conflicting stream is rejected or supersedes with an explicit reason **[Approved A11]**.
+- **One active stream per user [Approved A11].** If a second stream is requested while one is active, the new stream is rejected and the user sees a clear message that another recording is already active. The existing stream is never terminated or superseded and continues unaffected. A reconnect using the existing `client_stream_id` is a resume, not a second stream.
+- A rejected stream sends no audio to any provider, persists no transcript data and creates no capture gap or lifecycle event on the existing stream.
 
 ### FR-10 Platform recording
 - Android follows current microphone permission and foreground-service rules, including `POST_NOTIFICATIONS` for the persistent notification, and starts capture only from a visible user-initiated state.
