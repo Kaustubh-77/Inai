@@ -1,59 +1,47 @@
 # Inai - AI-Powered Communication assistant for Deaf people
 
 
-# INAI (இணை)
-### Every Voice. Every Connection.
+# INAI (இணை).
 
-An AI-powered communication assistant designed to
-bridge conversations between deaf and hearing people.
+**Making everyday conversations more accessible through real-time speech-to-text.**
 
-## Problem
-Communication barriers exist when people do not
-share a common language or sign language.
+Inai is an accessibility-first mobile application designed to help deaf and hard-of-hearing individuals understand spoken conversations through live transcription.
 
-## Solution
-INAI enables two-way communication through:
-- Real-time speech-to-text
-- Multilingual translation
-- Accessible conversation interface
+## Key Features
 
-## Features
-- Live transcription
-- Two-way conversation
-- Language selection
-- Conversation history
-- Accessible UI
+- **Real-time transcription:** Convert speech into readable text.
+- **Multilingual support:** Targeting Tamil, Telugu, Kannada, Malayalam, Hindi, and English.
+- **Conversation management:** Start, pause, resume, split, merge, and organize conversations.
+- **Daily history:** Access conversations organized by date, with individual timestamps.
+- **Hybrid full-day mode:** Combine automatic voice activity detection (VAD) with manual recording controls.
+- **Accessibility:** Adjustable text size, high contrast, and screen-reader support.
+
+## Technology Stack
+
+| Component | Technology |
+|---|---|
+| Mobile | React Native + TypeScript |
+| Android | Kotlin |
+| iOS | Swift |
+| Backend | Python + FastAPI |
+| Database | PostgreSQL |
+| Real-time communication | WebSockets |
+| Speech recognition | Streaming ASR provider |
 
 ## Architecture
-React + FastAPI + Speech Recognition
-+ Gemini + Firebase
 
-## Built With Kiro
-- Spec-driven development
-- Steering documents
-- Agent hooks
-- Custom agents
-- MCP integrations (if used)
+Inai uses native audio capture on Android and iOS, with a FastAPI backend handling real-time communication, speech recognition integration, and transcript management.
 
-## Installation
+## Privacy First
 
-### Frontend
-cd frontend
-npm install
-npm run dev
+- Audio is processed transiently and not stored by default.
+- Transcripts are stored as text.
+- Recording requires explicit user action.
+- Users remain in control of recording and their saved conversations.
 
-### Backend
-cd backend
-python -m venv venv
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+## Development Status
 
-## Environment Variables
-See .env.example.
+Currently in the specification and architecture phase. Development will proceed incrementally, beginning with live transcription and conversation history before introducing hybrid full-day recording.
 
-## Testing
-pytest
 
-## License
-MIT
-
+**Vision:** Building a more inclusive world where language and hearing barriers don't limit everyday communication.
