@@ -271,11 +271,13 @@ Procedure: look up by `client_gap_id` (client reports) or `server_gap_key` (serv
 
 **Gap closure on first accepted audio**
 - When the server accepts the first audio of a continuing stream (a successful resume, or a new stream after expiry) it sets `server_end_bound` of the open gap(s) of the originating stream to the corrected UTC start of that audio, through the same transaction. `end_estimated` is then `true` unless a client-measured `client_end` earlier than that bound refines it.
-- A new stream after expiry identifies the stream it continues with `continues_stream_id` in `stream.start` (the expired `client_stream_id`). The server verifies that it belongs to the same authenticated user and is `expired`; otherwise it is ignored. Without it, open gaps are not closed implicitly, and they remain open until the session ends.
+- A new stream after expiry may identify the stream it continues with `continues_stream_id` in `stream.start` (the expired `client_stream_id`). When it is supplied, the server must validate it before creating any checkpoint: the checkpoint must exist for the **authenticated user** (lookup by `(authenticated user_id, continues_stream_id)`) and have status `expired`. Any supplied value that fails this check (unknown, owned by another user, or not `expired`) is **rejected, not ignored**: the new stream is refused with the generic `stream_not_found` response, which is identical for every failure reason so existence and state are not disclosed. A rejected start creates no checkpoint, provider session or transcript data. When `continues_stream_id` is omitted, open gaps are not closed implicitly and remain open until the session ends.
 - Closure is idempotent: setting `server_end_bound` again with the same value is a no-op, and a later value never replaces an earlier one.
 
 **Client behaviour**
 - The engine assigns a `client_gap_id` when it first observes a gap, sends `capture.gap` (open) and later a closing update with the same id and its measured end. Retries after reconnect reuse the id.
+- A client gap report whose `source_stream_id` is not a stream of the authenticated user is rejected with the generic `stream_not_found` response (the composite foreign key to `stream_checkpoints (user_id, client_stream_id)` enforces this at the database level).
+- Checkpoints are retained after `expired` and `ended` for as long as gaps reference them; retention clean-up jobs must not delete a checkpoint referenced by `capture_gaps`.
 - The local store keys gaps by `client_gap_id` until the server's canonical row arrives through sync, then replaces the local row with the canonical one, so a merged gap is never shown twice.
 - The user-visible text never claims the audio was recovered. A gap with `start_estimated` or `end_estimated` is shown as approximate.
 
@@ -591,6 +593,15 @@ CREATE TABLE stream_checkpoints (
 -- Enforces one active stream per user (A11): only one slot-holding checkpoint per user.
 CREATE UNIQUE INDEX one_active_stream_per_user ON stream_checkpoints (user_id)
  WHERE status IN ('active','paused','reconnect_pending');
+
+-- Gap history is tied to its originating stream. Defined after stream_checkpoints because of table order.
+-- NO ACTION (not CASCADE): a checkpoint that has gaps cannot be deleted on its own, so gap history is preserved;
+-- account deletion still works because users(id) cascades to both tables in the same statement.
+ALTER TABLE capture_gaps
+ ADD CONSTRAINT fk_gap_source_stream
+ FOREIGN KEY (user_id, source_stream_id)
+ REFERENCES stream_checkpoints (user_id, client_stream_id)
+ ON DELETE NO ACTION;
 
 CREATE TABLE sync_tombstones (
  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
