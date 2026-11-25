@@ -82,7 +82,7 @@ Approved decisions: (1) native Kotlin/Swift owns audio capture, VAD, chunking an
 - Sequence audio chunks and acknowledge accepted data. Native replays unacknowledged chunks within a bounded in-memory replay window after reconnect **[Approved A8]**.
 - Prevent duplicate final messages after retry.
 - Handle network loss, reconnect, provider timeout and throttling.
-- **Capture gaps:** record any interval where audio was lost or not processed because of OS interruption, network loss beyond the replay window, permission revocation, audio route-change failure, process termination, auth expiry or provider failure. User pauses are not gaps. Gaps are visible, stored, synchronised and never filled with fabricated text.
+- **Capture gaps:** record any interval where audio was lost or not processed because of OS interruption, network loss beyond the replay window, permission revocation, audio route-change failure, process termination, auth expiry or provider failure. User pauses are not gaps. Gaps are visible, stored, synchronised and never filled with fabricated text. A gap observed by both the client and the server is stored as **one** canonical record: the server reconciles them deterministically and transactionally by user, originating stream, interval overlap and compatible reason (not by `client_gap_id` alone), keeps the most accurate boundaries and the `end_estimated` meaning, stays idempotent under repeated and concurrent reports, and never merges distinct adjacent or unrelated gaps.
 - Warn when speech may not have been processed.
 - Persist confirmed transcript messages incrementally.
 - **Timestamps:** message times derive from native capture offsets mapped to UTC, with server correction for client clock skew. Each message records a `timestamp_source`; approximate timing is not presented as exact.
@@ -174,7 +174,8 @@ Approved decisions: (1) native Kotlin/Swift owns audio capture, VAD, chunking an
 20. Substring search works for Latin, Devanagari, Tamil, Telugu, Kannada and Malayalam corpora on server and device with identical normalisation results.
 21. Account deletion removes server data, the Firebase user and local data.
 22. The account owner can end a paused stream from another device; no other user can; the slot is released and persisted transcripts are unchanged.
-23. A concurrent resume and expiry produce exactly one outcome, and a stream expired and replaced by a new stream keeps its gap and interruption history with separate stream identity and sequence numbering.
+23. A gap seen by both client and server is one canonical record, regardless of arrival order, repetition or concurrency; distinct adjacent or unrelated gaps stay separate; a gap closed on first accepted audio has `end_estimated = true`.
+24. A concurrent resume and expiry produce exactly one outcome, and a stream expired and replaced by a new stream keeps its gap and interruption history with separate stream identity and sequence numbering.
 
 ## Open validation items
 - Confirm provider streaming support for all six languages in the selected region (Sarvam AI is the first candidate; no provider is selected).

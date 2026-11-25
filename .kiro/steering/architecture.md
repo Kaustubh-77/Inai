@@ -80,7 +80,7 @@ Native VAD opens a candidate segment on speech start. Sustained silence proposes
 Native stamps each chunk with a monotonic `capture_offset_ms` relative to a stream anchor (device UTC + monotonic reading). The server maps provider results back to capture offsets and computes UTC timestamps, correcting for client clock skew. Each message records its `timestamp_source` so approximate timing is never presented as exact. Details in design.md §9.
 
 ## Capture gaps
-Any interval of lost audio coverage is stored as a CaptureGap and shown inline in the transcript timeline. User pauses are not gaps. Never fabricate text for a gap, and never imply capture continued. Details in design.md §10.
+Any interval of lost audio coverage is stored as a CaptureGap and shown inline in the transcript timeline. User pauses are not gaps. Never fabricate text for a gap, and never imply capture continued. A gap seen by both the client and the server is one canonical record: the server reconciles them transactionally by user, originating stream, interval overlap and compatible reason, with `client_gap_id` serving only as an idempotency key for repeated client reports. Details in design.md §8 (capture-gap reconciliation) and §14.
 
 ## Identity and authorization
 - Firebase Authentication for the MVP; sign-in methods are an open decision.
