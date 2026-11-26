@@ -5,14 +5,15 @@ description = "Inai MVP backend (FastAPI). See .kiro/specs/inai-mvp/ for require
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { text = "Proprietary" }
-# Approved M1 stack. Versions are pinned by uv.lock, which must be generated with
-# `uv lock` once package-index access is available (blocked in the current sandbox).
+# Approved M1 stack. Versions are pinned by uv.lock, which is generated with `uv lock`
+# (see .github/workflows/t04-lock-and-verify.yml) and committed after review.
 dependencies = [
     "fastapi",
     "uvicorn",
     "sqlalchemy>=2,<3",
     "alembic",
     "firebase-admin",
+    "psycopg[binary]>=3.2,<4",
 ]
 
 [dependency-groups]
