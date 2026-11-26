@@ -16,6 +16,25 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      # Throwaway values for the job's own ephemeral service container. Not secrets.
+      INAI_TEST_DATABASE_URL: postgresql+psycopg://inai_ci:inai_ci_only@localhost:5432/inai_ci
+      # Fail (instead of skip) the PostgreSQL schema tests if the database is unavailable.
+      INAI_REQUIRE_DB: "1"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: inai_ci
+          POSTGRES_PASSWORD: inai_ci_only
+          POSTGRES_DB: inai_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U inai_ci -d inai_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
