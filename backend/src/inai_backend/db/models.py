@@ -132,6 +132,7 @@ class Conversation(Base):
             ["day_sessions.id", "day_sessions.user_id"],
             ondelete="CASCADE",
         ),
+        UniqueConstraint("day_session_id", "segment_order", deferrable=True, initially="DEFERRED"),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -174,7 +175,11 @@ class TranscriptMessage(Base):
     edited_text: Mapped[str | None] = mapped_column(Text)
     edited_at: Mapped[dt.datetime | None] = _tstz(nullable=True)
     display_text: Mapped[str] = mapped_column(
-        Text, Computed("COALESCE(edited_text, original_text)", persisted=True)
+        Text,
+        Computed("COALESCE(edited_text, original_text)", persisted=True),
+        # Matches the migration: the generated column carries no NOT NULL constraint.
+        # It is never NULL in practice because original_text is NOT NULL.
+        nullable=True,
     )
     search_text: Mapped[str] = mapped_column(Text, nullable=False)
     search_norm_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
@@ -219,6 +224,9 @@ class StreamCheckpoint(Base):
         ForeignKeyConstraint(
             ["conversation_id", "user_id"],
             ["conversations.id", "conversations.user_id"],
+            # Column-list form (PostgreSQL 15+): clears only the routing target and keeps
+            # user_id, matching the migration.
+            ondelete="SET NULL (conversation_id)",
         ),
     )
 
