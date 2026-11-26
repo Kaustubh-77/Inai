@@ -1,0 +1,125 @@
+name: t04-lock-and-verify
+
+# Manual only. Generates backend/uv.lock, runs the backend quality checks and a
+# PostgreSQL 16 connectivity check, and uploads uv.lock as an artifact.
+# It never commits or pushes. Review and commit the artifact manually.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t04-lock-and-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lock-and-verify:
+    # Refuse to run from any ref other than the M1 branch.
+    if: github.ref == 'refs/heads/m1/backend-foundation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      UV_PYTHON: "3.11"
+      # Throwaway values for an ephemeral service container on the runner.
+      # Not secrets and not reachable from outside the job.
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: inai_ci
+      PGPASSWORD: inai_ci_only
+      PGDATABASE: inai_ci
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: inai_ci
+          POSTGRES_PASSWORD: inai_ci_only
+          POSTGRES_DB: inai_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U inai_ci -d inai_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      - name: Show toolchain versions
+        run: |
+          uv --version
+          uv run --no-project python --version
+
+      - name: Verify the psycopg dependency is declared
+        run: |
+          uv run --no-project python - <<'PY'
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              deps = tomllib.load(f)["project"]["dependencies"]
+          expected = "psycopg[binary]>=3.2,<4"
+          normalised = [d.replace(" ", "") for d in deps]
+          assert expected in normalised, f"{expected} not found in dependencies: {deps}"
+          print(f"Found {expected}")
+          PY
+
+      - name: Generate uv.lock
+        run: uv lock
+
+      - name: Confirm the lock file matches pyproject.toml
+        run: uv lock --check
+
+      - name: Sync locked dependencies
+        run: uv sync --locked
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check (mypy strict)
+        run: uv run mypy
+
+      - name: Tests
+        run: uv run pytest
+
+      - name: Verify PostgreSQL 16 connectivity
+        run: |
+          uv run python - <<'PY'
+          import psycopg
+
+          with psycopg.connect(connect_timeout=10) as conn:
+              row = conn.execute("SHOW server_version_num").fetchone()
+              assert row is not None
+              major = int(row[0]) // 10000
+              assert major == 16, f"expected PostgreSQL 16, got {major}"
+              one = conn.execute("SELECT 1").fetchone()
+              assert one is not None
+              assert one[0] == 1
+              print(f"PostgreSQL major version {major}: connection and query OK")
+          PY
+
+      - name: Upload uv.lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: uv-lock
+          path: backend/uv.lock
+          if-no-files-found: error
+          retention-days: 7
